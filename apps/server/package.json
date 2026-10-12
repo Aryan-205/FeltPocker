@@ -1,0 +1,21 @@
+{
+  "name": "@felt/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@felt/engine": "workspace:*",
+    "socket.io": "^4.8.4",
+    "tsx": "^4.23.15",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^7.0.2"
+  }
+}
