@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { signIn } from "@/lib/socket";
 import { compact, fmt, useProfile } from "@/lib/store";
 import { cn } from "@/lib/cn";
 import { ChipIcon } from "./ui/chip-icon";
@@ -9,7 +10,7 @@ import { Logo } from "./ui/logo";
 import { ProfileModal } from "./profile-modal";
 
 export function TopBar({ back, title, className }: { back?: { href: string; label: string }; title?: string; className?: string }) {
-  const { name, avatar, bankroll, hydrated, muted, toggleMute } = useProfile();
+  const { name, avatar, account, session, hydrated, muted, toggleMute } = useProfile();
   const [edit, setEdit] = useState(false);
 
   return (
@@ -39,10 +40,19 @@ export function TopBar({ back, title, className }: { back?: { href: string; labe
             <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M11 5 6 9H3v6h3l5 4V5Z" /><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" /></svg>
           )}
         </button>
-        <div className="glass flex h-10 items-center gap-2 rounded-full pl-1.5 pr-4" title={`${fmt(bankroll)} play chips`}>
-          <ChipIcon className="h-7 w-7" />
-          <span className="font-semibold tabular-nums text-gold-100">{hydrated ? compact(bankroll) : "—"}</span>
-        </div>
+        {hydrated && !session ? (
+          <button
+            onClick={() => signIn()}
+            className="glass flex h-10 items-center gap-2 rounded-full px-4 text-sm font-semibold text-gold-100 transition hover:bg-white/10"
+          >
+            Sign in
+          </button>
+        ) : (
+          <div className="glass flex h-10 items-center gap-2 rounded-full pl-1.5 pr-4" title={account ? `${fmt(account.chips)} play chips` : undefined}>
+            <ChipIcon className="h-7 w-7" />
+            <span className="font-semibold tabular-nums text-gold-100">{account ? compact(account.chips) : "—"}</span>
+          </div>
+        )}
         {hydrated && name && (
           <button
             onClick={() => setEdit(true)}

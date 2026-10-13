@@ -11,7 +11,7 @@ import { TopBar } from "../top-bar";
 import { ActionBar } from "../table/action-bar";
 import { PokerTable } from "../table/poker-table";
 import { Button } from "../ui/button";
-import { CoachBar } from "./coach-bar";
+import { CoachPanel } from "./coach-panel";
 import { FitBox } from "../fit-box";
 
 export function PracticeClient() {
@@ -37,7 +37,7 @@ function Setup({ onStart }: { onStart: (c: PracticeConfig) => void }) {
         <p className="text-[11px] font-semibold uppercase tracking-[0.4em] text-gold-300/80">Practice game</p>
         <h1 className="mt-3 font-display text-4xl font-semibold">Set up your table</h1>
         <p className="mt-2 text-sm text-cream/55">
-          Practice chips are separate from your bankroll. A coach above the table explains every decision.
+          Practice chips are separate from your bankroll. A coach beside the table talks you through every decision.
         </p>
 
         <div className="mt-8 space-y-7">
@@ -113,8 +113,8 @@ function PracticeGame({ config, onExit }: { config: PracticeConfig; onExit: () =
   const busted = complete && hero.stack === 0;
 
   return (
-    <div className="relative z-10 mx-auto flex min-h-0 w-full max-w-[1280px] flex-1 flex-col gap-2 px-3 pb-3 sm:gap-3 sm:px-6">
-      <CoachBar view={view} advice={advice} heroTurn={heroTurn} decisions={decisions} personalities={personalities.current} />
+    <div className="relative z-10 mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-3 px-3 pb-3 sm:px-6 md:flex-row">
+      <div className="flex min-h-[calc(100dvh-5rem)] min-w-0 flex-1 flex-col gap-2 sm:gap-3 md:min-h-0">
       <FitBox aspect={16 / 9.4} portraitAspect={3 / 4.4}>
           <PokerTable
             view={view}
@@ -153,6 +153,15 @@ function PracticeGame({ config, onExit }: { config: PracticeConfig; onExit: () =
           </div>
         )}
       </div>
+      </div>
+      <CoachPanel
+        view={view}
+        advice={advice}
+        heroTurn={heroTurn}
+        decisions={decisions}
+        personalities={personalities.current}
+        className="h-[420px] shrink-0 md:h-auto md:w-[340px] lg:w-[380px]"
+      />
     </div>
   );
 }

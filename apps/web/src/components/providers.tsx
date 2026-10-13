@@ -1,27 +1,22 @@
 "use client";
 
 import { AnimatePresence, motion } from "motion/react";
-import { type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, useEffect } from "react";
+import { useSocket } from "@/lib/socket";
 import { hydrateProfile, useProfile } from "@/lib/store";
-import { toast, useToasts } from "@/lib/toast";
+import { useToasts } from "@/lib/toast";
 import { cn } from "@/lib/cn";
 import { ProfileModal } from "./profile-modal";
 
 export function Providers({ children }: { children: ReactNode }) {
   const hydrated = useProfile((s) => s.hydrated);
   const name = useProfile((s) => s.name);
-  const claimed = useRef(false);
 
   useEffect(() => {
     void hydrateProfile();
   }, []);
-
-  useEffect(() => {
-    if (!hydrated || !name || claimed.current) return;
-    claimed.current = true;
-    const amount = useProfile.getState().claimDailyBonus();
-    if (amount) toast(`Daily bonus: +${amount.toLocaleString()} chips`, "Come back tomorrow for more.", "gold");
-  }, [hydrated, name]);
+  // Stay connected while signed in, so the bankroll and daily bonus show on every page.
+  useSocket();
 
   return (
     <>

@@ -22,7 +22,7 @@ export function FriendsClient() {
     try {
       const r = await request<{ ok: true; code: string } | { ok: false; error: string }>((cb) => socket.emit("room:join", { code: clean }, cb));
       if (!r.ok) throw new Error(r.error);
-      router.push(`/room/${r.code}`);
+      router.push(`/room?code=${r.code}`);
     } catch (e) {
       toast("Couldn't join", (e as Error).message, "error");
       setBusy(false);

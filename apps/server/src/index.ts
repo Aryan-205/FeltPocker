@@ -1,4 +1,4 @@
-import { createHash, randomInt } from "node:crypto";
+import { randomInt } from "node:crypto";
 import { createServer } from "node:http";
 import { Server, type Socket } from "socket.io";
 import { z } from "zod";
@@ -9,32 +9,37 @@ import {
   ROOM_CODE_ALPHABET,
   ROOM_CODE_LENGTH,
 } from "@felt/engine";
+import { buyIn, cashOut, claimDailyBonus, getAccount, publicInfo, recoverInPlay, setProfile, syncInPlay, type Account } from "./accounts";
+import { handleAuth } from "./auth";
+import { config } from "./config";
+import { migrate, pool } from "./db";
+import { allow, clientIp, limit, redis, resolveSession } from "./redis";
 import { Room } from "./room";
 
-const PORT = Number(process.env.PORT ?? 4000);
-const ORIGINS = process.env.CORS_ORIGIN?.split(",") ?? true;
 const GRACE_MS = 60_000;
 
 type IO = Server<ClientToServer, ServerToClient>;
-type Sock = Socket<ClientToServer, ServerToClient, Record<string, never>, { playerId?: string; name?: string; avatar?: string }>;
+type Sock = Socket<ClientToServer, ServerToClient, Record<string, never>, { playerId: string; name: string; avatar: string }>;
+
+let shuttingDown = false;
 
 const http = createServer((req, res) => {
   if (req.url === "/health") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, rooms: rooms.size }));
+    res.writeHead(shuttingDown ? 503 : 200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: !shuttingDown, rooms: rooms.size }));
     return;
   }
-  res.writeHead(404).end();
+  void handleAuth(req, res).then((handled) => {
+    if (!handled) res.writeHead(404).end();
+  });
 });
-const io: IO = new Server(http, { cors: { origin: ORIGINS } });
+const io: IO = new Server(http, { cors: { origin: config.webOrigins }, maxHttpBufferSize: 16_000 });
 
 const rooms = new Map<string, Room>();
 /** playerId → room code they're currently in. */
 const playerRoom = new Map<string, string>();
 /** playerId → live sockets. */
 const playerSockets = new Map<string, Set<string>>();
-/** Chips owed to players who weren't connected at cash-out time. */
-const pendingCredits = new Map<string, number>();
 
 // ── helpers ──────────────────────────────────────────────────
 
@@ -46,14 +51,26 @@ function newCode(): string {
   }
 }
 
-function credit(playerId: string, amount: number, reason: string) {
-  if (amount <= 0) return;
-  const socks = playerSockets.get(playerId);
-  if (socks?.size) {
-    for (const id of socks) io.to(id).emit("bankroll:credit", { amount, reason });
-  } else {
-    pendingCredits.set(playerId, (pendingCredits.get(playerId) ?? 0) + amount);
+/** Push a fresh balance to every tab the player has open. */
+function pushAccount(playerId: string, account: Account, note?: { title: string; body?: string }) {
+  for (const id of playerSockets.get(playerId) ?? []) io.to(id).emit("account", { account: publicInfo(account), note });
+}
+
+/** Return table chips to the bankroll (the player may be offline). */
+async function settle(playerId: string, amount: number, reason: string, notify = true): Promise<Account | null> {
+  try {
+    const account = await cashOut(playerId, amount, reason);
+    if (notify) pushAccount(playerId, account, amount > 0 ? { title: `+${amount.toLocaleString()} chips back in your bankroll`, body: reason } : undefined);
+    return account;
+  } catch (e) {
+    // The chips stay in `in_play` and are returned on the next boot.
+    console.error(`cash-out failed for ${playerId} (${amount}):`, e);
+    return null;
   }
+}
+
+function credit(playerId: string, amount: number, reason: string) {
+  void settle(playerId, amount, reason);
 }
 
 let lobbyTimer: NodeJS.Timeout | null = null;
@@ -83,6 +100,9 @@ const hooks = {
     io.to(`room:${room.code}`).emit("room:chat", msg);
   },
   credit,
+  handComplete(stacks: { id: string; stack: number }[]) {
+    syncInPlay(stacks).catch((e) => console.error("stack sync failed:", e));
+  },
   lobbyChanged,
 };
 
@@ -93,7 +113,8 @@ function closeIfEmpty(room: Room) {
   lobbyChanged();
 }
 
-function leaveCurrent(socket: Sock, playerId: string): number {
+/** Leave the current room and return any table chips to the bankroll. */
+async function leaveCurrent(playerId: string, reason: string): Promise<number> {
   const code = playerRoom.get(playerId);
   if (!code) return 0;
   const room = rooms.get(code);
@@ -102,7 +123,7 @@ function leaveCurrent(socket: Sock, playerId: string): number {
   if (!room) return 0;
   const cash = room.leave(playerId);
   closeIfEmpty(room);
-  void socket;
+  if (cash > 0) await settle(playerId, cash, reason);
   return cash;
 }
 
@@ -134,18 +155,40 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("raise"), to: z.number().int().positive() }),
 ]);
 
-const helloSchema = z.object({
-  token: z.string().min(16).max(128),
-  name: z.string().trim().min(1).max(20),
-  avatar: z.string().max(16),
+const profileSchema = z.object({
+  name: z.string().trim().min(2, "Name must be at least 2 characters").max(20),
+  avatar: z.string().min(1).max(16),
 });
 
-const fail = (e: unknown): { ok: false; error: string } => ({
-  ok: false,
-  error: e instanceof z.ZodError ? (e.issues[0]?.message ?? "Invalid input") : e instanceof Error ? e.message : "Something went wrong",
-});
+/** Postgres/Redis/network errors carry a `code`; their text is for logs, not players. */
+const isInternal = (e: unknown) => !(e instanceof Error) || typeof (e as { code?: unknown }).code === "string";
+
+const fail = (e: unknown): { ok: false; error: string } => {
+  if (e instanceof z.ZodError) return { ok: false, error: e.issues[0]?.message ?? "Invalid input" };
+  if (isInternal(e)) {
+    console.error(e);
+    return { ok: false, error: "Something went wrong on the server. Please try again" };
+  }
+  return { ok: false, error: (e as Error).message };
+};
 
 // ── connections ──────────────────────────────────────────────
+
+// Every socket must carry a valid session from Google sign-in.
+io.use(async (socket, next) => {
+  try {
+    if (shuttingDown) return next(new Error("restarting"));
+    if (!(await allow(`conn:${clientIp(socket.request)}`, 30, 60))) return next(new Error("rate_limited"));
+    const userId = await resolveSession(socket.handshake.auth?.session);
+    const account = userId ? await getAccount(userId) : null;
+    if (!account || account.banned) return next(new Error("unauthorized"));
+    socket.data = { playerId: account.id, name: account.name, avatar: account.avatar };
+    next();
+  } catch (e) {
+    console.error("handshake failed:", e);
+    next(new Error("unavailable"));
+  }
+});
 
 io.on("connection", (socket: Sock) => {
   // Simple token bucket: 15 events/sec burst, refilled continuously.
@@ -160,20 +203,22 @@ io.on("connection", (socket: Sock) => {
     next();
   });
 
-  const ack = <T extends object>(cb: unknown, fn: () => Ack<T>) => {
-    if (typeof cb !== "function") return;
-    try {
-      cb(fn());
-    } catch (e) {
-      cb(fail(e));
-    }
+  const ack = <T extends object>(cb: unknown, fn: () => Ack<T> | Promise<Ack<T>>) => {
+    void (async () => {
+      try {
+        const r = await fn();
+        if (typeof cb === "function") cb(r);
+      } catch (e) {
+        const r = fail(e);
+        if (typeof cb === "function") cb(r);
+      }
+    })();
   };
 
-  const me = () => {
-    const id = socket.data.playerId;
-    if (!id) throw new Error("Say hello first");
-    return id;
-  };
+  const me = () => socket.data.playerId;
+  const playerId = me();
+  if (!playerSockets.has(playerId)) playerSockets.set(playerId, new Set());
+  playerSockets.get(playerId)!.add(socket.id);
   const myRoom = () => {
     const code = playerRoom.get(me());
     const room = code ? rooms.get(code) : undefined;
@@ -182,18 +227,34 @@ io.on("connection", (socket: Sock) => {
   };
 
   socket.on("hello", (payload, cb) =>
-    ack(cb, () => {
-      const { token, name, avatar } = helloSchema.parse(payload);
-      const playerId = createHash("sha256").update(token).digest("hex").slice(0, 20);
-      socket.data = { playerId, name, avatar };
-      if (!playerSockets.has(playerId)) playerSockets.set(playerId, new Set());
-      playerSockets.get(playerId)!.add(socket.id);
-      const owed = pendingCredits.get(playerId);
-      if (owed) {
-        pendingCredits.delete(playerId);
-        setTimeout(() => socket.emit("bankroll:credit", { amount: owed, reason: "Chips returned from a table you left" }), 300);
+    ack(cb, async () => {
+      // A brand-new account takes the name the player already picked on this device.
+      const seed = profileSchema.safeParse(payload);
+      let account = seed.success ? await setProfile(me(), seed.data.name, seed.data.avatar, true) : (await getAccount(me()))!;
+      socket.data.name = account.name;
+      socket.data.avatar = account.avatar;
+      const bonus = await claimDailyBonus(me());
+      account = bonus.account;
+      if (bonus.amount) {
+        const note = { title: `Daily bonus: +${bonus.amount.toLocaleString()} chips`, body: "Come back tomorrow for more." };
+        setTimeout(() => socket.emit("account", { account: publicInfo(account), note }), 300);
       }
-      return { ok: true, playerId };
+      return { ok: true, playerId: me(), account: publicInfo(account) };
+    }),
+  );
+
+  socket.on("profile:update", (payload, cb) =>
+    ack(cb, async () => {
+      await limit(`profile:${me()}`, 10, 600, "Too many profile changes");
+      const { name, avatar } = profileSchema.parse(payload);
+      const account = await setProfile(me(), name, avatar);
+      for (const id of playerSockets.get(me()) ?? []) {
+        const s = io.sockets.sockets.get(id) as Sock | undefined;
+        if (s) Object.assign(s.data, { name, avatar });
+      }
+      const code = playerRoom.get(me());
+      if (code) rooms.get(code)?.rename(me(), name, avatar);
+      return { ok: true, account: publicInfo(account) };
     }),
   );
 
@@ -204,9 +265,11 @@ io.on("connection", (socket: Sock) => {
   socket.on("lobby:unsubscribe", () => void socket.leave("lobby"));
 
   socket.on("room:create", (raw, cb) =>
-    ack(cb, () => {
+    ack(cb, async () => {
       const playerId = me();
       const settings = settingsSchema.parse(raw);
+      if (rooms.size >= config.maxRooms) throw new Error("The server is full right now. Try again soon");
+      await limit(`create:${playerId}`, 10, 600, "You're creating tables too quickly");
       const code = newCode();
       const name = settings.name || `${socket.data.name}'s table`;
       const room = new Room(code, { ...settings, name }, playerId, socket.data.name!, hooks);
@@ -217,15 +280,15 @@ io.on("connection", (socket: Sock) => {
   );
 
   socket.on("room:join", (raw, cb) =>
-    ack(cb, () => {
+    ack(cb, async () => {
       const playerId = me();
+      await limit(`join:${playerId}`, 30, 60, "Too many attempts");
       const code = z.string().trim().toUpperCase().length(ROOM_CODE_LENGTH).parse(raw?.code);
       const room = rooms.get(code);
       if (!room) throw new Error("No table found with that code");
       const current = playerRoom.get(playerId);
       if (current && current !== code) {
-        const cash = leaveCurrent(socket, playerId);
-        if (cash) credit(playerId, cash, "Cashed out when you switched tables");
+        await leaveCurrent(playerId, "Cashed out when you switched tables");
       }
       playerRoom.set(playerId, code);
       socket.join(`room:${code}`);
@@ -236,26 +299,53 @@ io.on("connection", (socket: Sock) => {
   );
 
   socket.on("room:leave", (cb) =>
-    ack(cb, () => {
-      const cashOut = leaveCurrent(socket, me());
-      return { ok: true, cashOut };
+    ack(cb, async () => {
+      const amount = await leaveCurrent(me(), "You left the table");
+      return { ok: true, cashOut: amount };
     }),
   );
 
+  // Chips leave the bankroll before they reach the table, and go back if seating fails.
   socket.on("room:sit", (raw, cb) =>
-    ack(cb, () => {
+    ack(cb, async () => {
       const p = z.object({ seat: z.number().int(), buyIn: z.number().int().positive() }).parse(raw);
-      const buyIn = myRoom().sit(me(), p.seat, p.buyIn);
-      return { ok: true, buyIn };
+      const room = myRoom();
+      const amount = room.sitAmount(me(), p.seat, p.buyIn);
+      const account = await buyIn(me(), amount, `Buy-in at table ${room.code}`);
+      try {
+        if (rooms.get(room.code) !== room) throw new Error("The table closed");
+        room.sit(me(), p.seat, amount);
+      } catch (e) {
+        await settle(me(), amount, "Buy-in refunded");
+        throw e;
+      }
+      pushAccount(me(), account);
+      return { ok: true, buyIn: amount };
     }),
   );
 
-  socket.on("room:stand", (cb) => ack(cb, () => ({ ok: true, cashOut: myRoom().stand(me()) })));
+  socket.on("room:stand", (cb) =>
+    ack(cb, async () => {
+      const amount = myRoom().stand(me());
+      if (amount > 0) await settle(me(), amount, "You stood up from the table");
+      return { ok: true, cashOut: amount };
+    }),
+  );
 
   socket.on("room:rebuy", (raw, cb) =>
-    ack(cb, () => {
-      const amount = z.number().int().positive().parse(raw?.amount);
-      return { ok: true, amount: myRoom().rebuy(me(), amount) };
+    ack(cb, async () => {
+      const room = myRoom();
+      const add = room.rebuyAmount(me(), z.number().int().positive().parse(raw?.amount));
+      const account = await buyIn(me(), add, `Top-up at table ${room.code}`);
+      try {
+        if (rooms.get(room.code) !== room) throw new Error("The table closed");
+        room.rebuy(me(), add);
+      } catch (e) {
+        await settle(me(), add, "Top-up refunded");
+        throw e;
+      }
+      pushAccount(me(), account);
+      return { ok: true, amount: add };
     }),
   );
 
@@ -274,17 +364,21 @@ io.on("connection", (socket: Sock) => {
   );
 
   socket.on("chat:send", (raw) => {
-    try {
-      myRoom().say(me(), z.string().max(400).parse(raw?.text));
-    } catch {
-      /* ignore */
-    }
+    void (async () => {
+      try {
+        const text = z.string().max(400).parse(raw?.text);
+        const room = myRoom();
+        if (!(await allow(`chat:${me()}`, 8, 15))) return socket.emit("room:chat", { id: `rl${Date.now()}`, name: "Dealer", avatar: "🎩", text: "Slow down, you're sending messages too quickly.", at: Date.now(), system: true });
+        room.say(me(), text);
+      } catch {
+        /* ignore */
+      }
+    })();
   });
 
   socket.on("disconnect", () => {
-    const playerId = socket.data.playerId;
-    if (!playerId) return;
     playerSockets.get(playerId)?.delete(socket.id);
+    if (playerSockets.get(playerId)?.size === 0) playerSockets.delete(playerId);
     const code = playerRoom.get(playerId);
     const room = code ? rooms.get(code) : undefined;
     room?.dropSocket(playerId, socket.id);
@@ -301,4 +395,27 @@ setInterval(() => {
   for (const [playerId, code] of playerRoom) if (!rooms.get(code)?.members.has(playerId)) playerRoom.delete(playerId);
 }, 5_000);
 
-http.listen(PORT, () => console.log(`♠ Felt server listening on :${PORT}`));
+// ── lifecycle ────────────────────────────────────────────────
+
+/** Cash everyone out before exiting, so a deploy never costs anyone chips. */
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received, closing ${rooms.size} tables…`);
+  const refunds = [...rooms.values()].flatMap((room) => {
+    io.to(`room:${room.code}`).emit("room:closed", { reason: "The server is restarting for an update. Your chips are back in your bankroll" });
+    return room.shutdown();
+  });
+  rooms.clear();
+  await Promise.all(refunds.map((r) => settle(r.id, r.amount, "Table closed for a server update")));
+  io.close();
+  await Promise.allSettled([pool.end(), redis.quit()]);
+  process.exit(0);
+}
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
+
+await migrate();
+const recovered = await recoverInPlay();
+if (recovered) console.log(`returned table chips to ${recovered} players after an unclean shutdown`);
+http.listen(config.port, () => console.log(`♠ Felt server listening on :${config.port}`));

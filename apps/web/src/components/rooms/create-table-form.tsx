@@ -55,7 +55,7 @@ export function CreateTableForm({ visibility, onDone }: { visibility: Visibility
       const r = await request<{ ok: true; code: string } | { ok: false; error: string }>((cb) => socket.emit("room:create", settings, cb));
       if (!r.ok) throw new Error(r.error);
       onDone?.();
-      router.push(`/room/${r.code}`);
+      router.push(`/room?code=${r.code}`);
     } catch (e) {
       toast("Couldn't create table", (e as Error).message, "error");
       setBusy(false);

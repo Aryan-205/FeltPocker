@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { rehello } from "@/lib/socket";
+import { saveProfile, signIn, signOut } from "@/lib/socket";
 import { AVATARS, STARTING_BANKROLL, fmt, useProfile } from "@/lib/store";
 import { cn } from "@/lib/cn";
 import { Button } from "./ui/button";
@@ -16,8 +16,7 @@ export function ProfileModal({ open, onClose, firstTime }: { open: boolean; onCl
   const save = () => {
     if (!valid) return;
     profile.setProfile(name, avatar);
-    if (firstTime) useProfile.setState({ lastBonusDay: new Date().toISOString().slice(0, 10) });
-    rehello();
+    void saveProfile(name.trim(), avatar);
     onClose();
   };
 
@@ -30,9 +29,8 @@ export function ProfileModal({ open, onClose, firstTime }: { open: boolean; onCl
         <h2 className="mt-2 font-display text-3xl font-semibold">{firstTime ? "Take a seat" : "Edit profile"}</h2>
         {firstTime && (
           <p className="mt-2 text-sm text-cream/60">
-            Pick a table name and avatar. You start with{" "}
-            <span className="font-semibold text-gold-200">{fmt(STARTING_BANKROLL)}</span> play chips. No real money,
-            ever.
+            Pick a table name and avatar. Learn and practise right away, then sign in with Google to play online with{" "}
+            <span className="font-semibold text-gold-200">{fmt(STARTING_BANKROLL)}</span> play chips. No real money, ever.
           </p>
         )}
       </div>
@@ -79,6 +77,32 @@ export function ProfileModal({ open, onClose, firstTime }: { open: boolean; onCl
         <Button type="submit" size="lg" className="w-full" disabled={!valid}>
           {firstTime ? "Enter the room" : "Save"}
         </Button>
+        {!firstTime && (
+          <p className="text-center text-xs text-cream/45">
+            {profile.session ? (
+              <>
+                Signed in with Google.{" "}
+                <button
+                  type="button"
+                  className="font-semibold text-cream/70 underline-offset-2 hover:underline"
+                  onClick={() => {
+                    void signOut();
+                    onClose();
+                  }}
+                >
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <>
+                Playing as a guest.{" "}
+                <button type="button" className="font-semibold text-gold-200 underline-offset-2 hover:underline" onClick={() => signIn()}>
+                  Sign in to play online
+                </button>
+              </>
+            )}
+          </p>
+        )}
       </form>
     </Modal>
   );

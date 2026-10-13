@@ -1,0 +1,27 @@
+# Production on a single VM (e.g. Oracle Cloud Always Free).
+# Postgres is Neon and Redis is Upstash, so only the game server and the
+# Cloudflare Tunnel run here. No ports are opened on the VM.
+#
+#   cp deploy/.env.example deploy/.env   # fill it in
+#   docker compose -f deploy/docker-compose.yml up -d --build
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      TRUST_PROXY: cloudflare
+    restart: unless-stopped
+    # Give tables time to cash everyone out on deploys.
+    stop_grace_period: 30s
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    env_file: .env
+    restart: unless-stopped
+    depends_on: [server]

@@ -3,13 +3,14 @@
 import type { ChatMessage, PlayerAction, RoomState } from "@felt/engine";
 import { AnimatePresence, motion } from "motion/react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { use, useCallback, useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTableSounds } from "@/hooks/use-table-sounds";
 import { request, useSocket } from "@/lib/socket";
 import { fmt, useProfile } from "@/lib/store";
 import { toast } from "@/lib/toast";
 
+import { SignInGate } from "../auth/sign-in-gate";
 import { FitBox } from "../fit-box";
 import { TopBar } from "../top-bar";
 import { ActionBar } from "../table/action-bar";
@@ -21,8 +22,13 @@ import { Chat } from "./chat";
 
 type AckR<T = object> = ({ ok: true } & T) | { ok: false; error: string };
 
-export function RoomClient({ params }: { params: Promise<{ code: string }> }) {
-  const { code: raw } = use(params);
+export function RoomFromQuery() {
+  const code = useSearchParams().get("code") ?? "";
+  // Remount on code change so a new table starts from a clean slate.
+  return <RoomClient key={code} code={code} />;
+}
+
+export function RoomClient({ code: raw }: { code: string }) {
   const code = raw.toUpperCase();
   const router = useRouter();
   const { socket, status } = useSocket();
@@ -32,7 +38,6 @@ export function RoomClient({ params }: { params: Promise<{ code: string }> }) {
   const [sitAt, setSitAt] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
-  const credit = useProfile((s) => s.credit);
   const joined = useRef(false);
 
   useTableSounds(room?.view ?? null);
@@ -58,12 +63,8 @@ export function RoomClient({ params }: { params: Promise<{ code: string }> }) {
       socket.off("room:closed", onClosed);
       if (joined.current) {
         joined.current = false;
-        socket.emit("room:leave", (r) => {
-          if (r?.ok && r.cashOut > 0) {
-            useProfile.getState().credit(r.cashOut);
-            toast(`+${fmt(r.cashOut)} chips back in your bankroll`, "You left the table.", "gold");
-          }
-        });
+        // The server returns any table chips and sends the updated bankroll.
+        socket.emit("room:leave");
       }
     };
   }, [socket, status, code]);
@@ -87,10 +88,7 @@ export function RoomClient({ params }: { params: Promise<{ code: string }> }) {
   const stand = async () => {
     if (!socket) return;
     const r = await request<AckR<{ cashOut: number }>>((cb) => socket.emit("room:stand", cb));
-    if (r.ok && r.cashOut > 0) {
-      credit(r.cashOut);
-      toast(`+${fmt(r.cashOut)} chips back in your bankroll`, undefined, "gold");
-    }
+    if (!r.ok) toast("Couldn't stand up", r.error, "error");
   };
 
   const start = async () => {
@@ -101,14 +99,22 @@ export function RoomClient({ params }: { params: Promise<{ code: string }> }) {
 
   const rebuy = async () => {
     if (!socket || !room) return;
-    const amount = Math.min(useProfile.getState().bankroll, room.settings.maxBuyIn);
+    const amount = Math.min(useProfile.getState().account?.chips ?? 0, room.settings.maxBuyIn);
     if (amount <= 0) return toast("Your bankroll is empty", "Come back tomorrow for your daily bonus.", "error");
     const r = await request<AckR<{ amount: number }>>((cb) => socket.emit("room:rebuy", { amount }, cb));
-    if (r.ok) {
-      useProfile.getState().debit(r.amount);
-      toast(`Added ${fmt(r.amount)} chips`, undefined, "success");
-    } else toast("Couldn't add chips", r.error, "error");
+    if (r.ok) toast(`Added ${fmt(r.amount)} chips`, undefined, "success");
+    else toast("Couldn't add chips", r.error, "error");
   };
+
+  if (status === "signed-out")
+    return (
+      <main className="room-bg flex min-h-dvh flex-col">
+        <TopBar back={{ href: "/", label: "Lobby" }} />
+        <div className="mt-10 px-4">
+          <SignInGate>{null}</SignInGate>
+        </div>
+      </main>
+    );
 
   if (error)
     return (
@@ -239,7 +245,7 @@ export function RoomClient({ params }: { params: Promise<{ code: string }> }) {
 function CodeBadge({ code }: { code: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    const link = `${window.location.origin}/room/${code}`;
+    const link = `${window.location.origin}/room?code=${code}`;
     try {
       await navigator.clipboard.writeText(link);
       setCopied(true);
@@ -288,8 +294,7 @@ function WaitingCard({ room, seated, onStart }: { room: RoomState; seated: numbe
 
 function BuyInModal({ room, seat, onClose, onSat }: { room: RoomState; seat: number; onClose: () => void; onSat: () => void }) {
   const { socket } = useSocket();
-  const bankroll = useProfile((s) => s.bankroll);
-  const debit = useProfile((s) => s.debit);
+  const bankroll = useProfile((s) => s.account?.chips ?? 0);
   const { minBuyIn, maxBuyIn, bigBlind } = room.settings;
   const max = Math.min(maxBuyIn, bankroll);
   const [amount, setAmount] = useState(() => Math.min(max, Math.max(minBuyIn, Math.round((minBuyIn + maxBuyIn) / 2 / bigBlind) * bigBlind)));
@@ -302,7 +307,6 @@ function BuyInModal({ room, seat, onClose, onSat }: { room: RoomState; seat: num
     try {
       const r = await request<AckR<{ buyIn: number }>>((cb) => socket.emit("room:sit", { seat, buyIn: amount }, cb));
       if (!r.ok) throw new Error(r.error);
-      debit(r.buyIn);
       onSat();
     } catch (e) {
       toast("Couldn't sit down", (e as Error).message, "error");

@@ -61,8 +61,20 @@ export interface RoomState {
 
 export type Ack<T = object> = ({ ok: true } & T) | { ok: false; error: string };
 
+/** The signed-in player's account. Chips live on the server, never in the browser. */
+export interface AccountInfo {
+  name: string;
+  avatar: string;
+  chips: number;
+}
+
+export const STARTING_BANKROLL = 10_000;
+export const DAILY_BONUS = 2_000;
+
 export interface ClientToServer {
-  hello: (p: { token: string; name: string; avatar: string }, ack: (r: Ack<{ playerId: string }>) => void) => void;
+  /** Sent after connecting. `name`/`avatar` seed a brand-new account's profile. */
+  hello: (p: { name: string; avatar: string }, ack: (r: Ack<{ playerId: string; account: AccountInfo }>) => void) => void;
+  "profile:update": (p: { name: string; avatar: string }, ack: (r: Ack<{ account: AccountInfo }>) => void) => void;
   "lobby:subscribe": () => void;
   "lobby:unsubscribe": () => void;
   "room:create": (s: RoomSettings, ack: (r: Ack<{ code: string }>) => void) => void;
@@ -81,8 +93,8 @@ export interface ServerToClient {
   "room:state": (s: RoomState) => void;
   "room:chat": (m: ChatMessage) => void;
   "room:closed": (p: { reason: string }) => void;
-  /** Chips returned to the player's bankroll (e.g. after a disconnect timed out). */
-  "bankroll:credit": (p: { amount: number; reason: string }) => void;
+  /** The player's bankroll changed. `note` explains why (e.g. chips returned after a disconnect). */
+  account: (p: { account: AccountInfo; note?: { title: string; body?: string } }) => void;
 }
 
 export const ROOM_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";

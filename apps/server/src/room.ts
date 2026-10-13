@@ -34,6 +34,8 @@ export interface RoomHooks {
   chat(room: Room, msg: ChatMessage): void;
   /** Return chips to a player's bankroll. */
   credit(playerId: string, amount: number, reason: string): void;
+  /** A hand finished: persist every seated player's stack. */
+  handComplete(stacks: { id: string; stack: number }[]): void;
   lobbyChanged(): void;
 }
 
@@ -53,6 +55,7 @@ export class Room {
   private turnTimer: NodeJS.Timeout | null = null;
   private handTimer: NodeJS.Timeout | null = null;
   private lastTurnKey = "";
+  private persistedHand = -1;
 
   constructor(
     readonly code: string,
@@ -121,13 +124,20 @@ export class Room {
     return cashOut;
   }
 
-  sit(playerId: string, seat: number, buyIn: number): number {
+  /** Validates a seat request and returns the buy-in to charge. Call before taking chips. */
+  sitAmount(playerId: string, seat: number, buyIn: number): number {
     const m = this.members.get(playerId);
     if (!m) throw new Error("Join the room first");
     if (m.seat !== null) throw new Error("You're already seated");
     if (seat < 0 || seat >= this.settings.maxSeats) throw new Error("Invalid seat");
     if (this.state.seats[seat]) throw new Error("That seat is taken");
-    const amount = Math.max(this.settings.minBuyIn, Math.min(this.settings.maxBuyIn, Math.floor(buyIn)));
+    return Math.max(this.settings.minBuyIn, Math.min(this.settings.maxBuyIn, Math.floor(buyIn)));
+  }
+
+  /** Seat a player with chips already taken from their bankroll. */
+  sit(playerId: string, seat: number, amount: number): number {
+    if (this.sitAmount(playerId, seat, amount) !== amount) throw new Error("Invalid buy-in");
+    const m = this.members.get(playerId)!;
     this.state = sitDown(this.state, seat, { id: playerId, name: m.name, avatar: m.avatar }, amount);
     m.seat = seat;
     this.system(`${m.name} sat down with ${amount.toLocaleString()} chips`);
@@ -146,7 +156,8 @@ export class Room {
     return cashOut;
   }
 
-  rebuy(playerId: string, amount: number): number {
+  /** Validates a top-up and returns the amount to charge. Call before taking chips. */
+  rebuyAmount(playerId: string, amount: number): number {
     const m = this.members.get(playerId);
     if (!m || m.seat === null) throw new Error("Not seated");
     const p = this.state.seats[m.seat]!;
@@ -154,7 +165,14 @@ export class Room {
     const room = this.settings.maxBuyIn - p.stack;
     const add = Math.max(0, Math.min(room, Math.floor(amount)));
     if (add <= 0) throw new Error("You're already at the maximum buy-in");
-    this.state = addChips(this.state, m.seat, add);
+    return add;
+  }
+
+  /** Add chips already taken from the player's bankroll. */
+  rebuy(playerId: string, add: number): number {
+    if (this.rebuyAmount(playerId, add) !== add) throw new Error("Invalid amount");
+    const seat = this.members.get(playerId)!.seat!;
+    this.state = addChips(this.state, seat, add);
     this.changed();
     return add;
   }
@@ -173,6 +191,15 @@ export class Room {
     if (!m || m.seat === null) throw new Error("Not seated");
     if (this.state.toAct !== m.seat) throw new Error("Not your turn");
     this.state = applyAction(this.state, m.seat, action);
+    this.changed();
+  }
+
+  /** Rename a member. Takes effect at the table the next time they sit. */
+  rename(playerId: string, name: string, avatar: string) {
+    const m = this.members.get(playerId);
+    if (!m) return;
+    m.name = name;
+    m.avatar = avatar;
     this.changed();
   }
 
@@ -236,8 +263,12 @@ export class Room {
     }
   }
 
-  /** Between hands: remove players who left or have been gone too long. */
+  /** Between hands: save stacks, then remove players who left or have been gone too long. */
   private afterHand() {
+    if (this.persistedHand !== this.state.handNumber) {
+      this.persistedHand = this.state.handNumber;
+      this.hooks.handComplete(this.seatedStacks());
+    }
     for (const m of [...this.members.values()]) {
       if (m.leaving || (m.disconnectedAt && Date.now() - m.disconnectedAt > 60_000)) {
         const cash = this.leave(m.playerId);
@@ -281,6 +312,24 @@ export class Room {
       const cash = this.leave(m.playerId);
       if (cash > 0) this.hooks.credit(m.playerId, cash, `Cashed out from table ${this.code}`);
     }
+  }
+
+  private seatedStacks() {
+    return [...this.members.values()].flatMap((m) => (m.seat !== null ? [{ id: m.playerId, stack: this.state.seats[m.seat]?.stack ?? 0 }] : []));
+  }
+
+  /**
+   * Close the table for a server shutdown. A hand in progress is cancelled and
+   * everyone gets back what they started it with.
+   */
+  shutdown(): { id: string; amount: number }[] {
+    const live = isHandLive(this.state);
+    const refunds = [...this.members.values()].flatMap((m) => {
+      const p = m.seat !== null ? this.state.seats[m.seat] : null;
+      return p ? [{ id: m.playerId, amount: p.stack + (live ? p.totalBet : 0) }] : [];
+    });
+    this.destroy();
+    return refunds;
   }
 
   get isEmpty() {

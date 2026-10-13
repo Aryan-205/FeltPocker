@@ -53,7 +53,7 @@ export function LobbyClient() {
         </div>
         <div className="flex gap-2">
           {quick && (
-            <Button variant="glass" onClick={() => router.push(`/room/${quick.code}`)}>
+            <Button variant="glass" onClick={() => router.push(`/room?code=${quick.code}`)}>
               ⚡ Quick seat
             </Button>
           )}
@@ -131,7 +131,7 @@ export function LobbyClient() {
                       size="sm"
                       variant={full ? "glass" : "gold"}
                       className="row-span-2 row-start-1 w-20 md:row-span-1 md:row-start-auto"
-                      onClick={() => router.push(`/room/${r.code}`)}
+                      onClick={() => router.push(`/room?code=${r.code}`)}
                     >
                       {full ? "Watch" : "Join"}
                     </Button>

@@ -91,7 +91,8 @@ export function usePractice(config: PracticeConfig | null) {
     if (!state || !isHandLive(state) || state.toAct === null || state.toAct === HERO) return;
     const seat = state.toAct;
     const heroOut = state.seats[HERO]!.folded;
-    const delay = heroOut ? 380 + Math.random() * 300 : 750 + Math.random() * 850;
+    // Slow enough that the coach can explain each action before the next one.
+    const delay = heroOut ? 1200 + Math.random() * 600 : 1800 + Math.random() * 1000;
     const id = setTimeout(() => {
       const cur = stateRef.current;
       if (!cur || cur.toAct !== seat) return;
@@ -115,7 +116,7 @@ export function usePractice(config: PracticeConfig | null) {
       return;
     }
     useProfile.getState().setPracticeChips(state.seats[HERO]!.stack);
-    setAutoDealIn(8);
+    setAutoDealIn(12);
     const id = setInterval(() => setAutoDealIn((n) => (n === null ? null : Math.max(0, n - 1))), 1000);
     return () => clearInterval(id);
   }, [state]);

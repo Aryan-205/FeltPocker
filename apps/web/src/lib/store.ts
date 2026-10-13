@@ -1,69 +1,58 @@
 "use client";
 
+import type { AccountInfo } from "@felt/engine";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
-export const STARTING_BANKROLL = 10_000;
-export const DAILY_BONUS = 2_000;
+export { DAILY_BONUS, STARTING_BANKROLL } from "@felt/engine";
 export const PRACTICE_STACK = 2_000;
 
 export const AVATARS = ["🦊", "🐻", "🦁", "🐯", "🐼", "🦉", "🐺", "🐸", "🐙", "🦄", "🐲", "🦅"];
 
-const newToken = () =>
-  globalThis.crypto?.randomUUID?.().replace(/-/g, "") + Math.random().toString(36).slice(2, 10);
-
 interface ProfileState {
-  token: string;
   name: string;
   avatar: string;
-  bankroll: number;
-  lastBonusDay: string | null;
+  /** Login token from Google sign-in. Online play needs it; Learn and Practice don't. */
+  session: string | null;
+  /** The signed-in account as last reported by the server. Chips live on the server. */
+  account: AccountInfo | null;
   practiceChips: number;
   muted: boolean;
   hydrated: boolean;
   setProfile(name: string, avatar: string): void;
-  debit(amount: number): boolean;
-  credit(amount: number): void;
-  claimDailyBonus(): number;
+  setSession(session: string | null): void;
+  setAccount(account: AccountInfo | null): void;
   setPracticeChips(n: number): void;
   toggleMute(): void;
 }
 
-const today = () => new Date().toISOString().slice(0, 10);
-
 export const useProfile = create<ProfileState>()(
   persist(
-    (set, get) => ({
-      token: "",
+    (set) => ({
       name: "",
       avatar: AVATARS[0]!,
-      bankroll: STARTING_BANKROLL,
-      lastBonusDay: null,
+      session: null,
+      account: null,
       practiceChips: PRACTICE_STACK,
       muted: false,
       hydrated: false,
       setProfile: (name, avatar) => set({ name: name.trim().slice(0, 20), avatar }),
-      debit: (amount) => {
-        if (amount > get().bankroll) return false;
-        set((s) => ({ bankroll: s.bankroll - amount }));
-        return true;
-      },
-      credit: (amount) => set((s) => ({ bankroll: s.bankroll + Math.max(0, Math.floor(amount)) })),
-      claimDailyBonus: () => {
-        const s = get();
-        if (s.lastBonusDay === today()) return 0;
-        // Top up broke players a bit more generously.
-        const amount = s.bankroll < 1_000 ? DAILY_BONUS * 2 : DAILY_BONUS;
-        set({ bankroll: s.bankroll + amount, lastBonusDay: today() });
-        return amount;
-      },
+      setSession: (session) => set(session ? { session } : { session: null, account: null }),
+      // The server's profile wins once signed in, so every device shows the same name.
+      setAccount: (account) => set(account ? { account, name: account.name, avatar: account.avatar } : { account: null }),
       setPracticeChips: (n) => set({ practiceChips: Math.max(0, Math.floor(n)) }),
       toggleMute: () => set((s) => ({ muted: !s.muted })),
     }),
     {
       name: "felt-profile",
+      version: 2,
       storage: createJSONStorage(() => localStorage),
-      partialize: ({ hydrated: _h, ...rest }) => rest,
+      partialize: ({ name, avatar, session, practiceChips, muted }) => ({ name, avatar, session, practiceChips, muted }),
+      // v1 kept a play-money bankroll in the browser; chips now live on the server.
+      migrate: (old) => {
+        const o = (old ?? {}) as Partial<ProfileState>;
+        return { name: o.name ?? "", avatar: o.avatar ?? AVATARS[0]!, session: null, practiceChips: o.practiceChips ?? PRACTICE_STACK, muted: !!o.muted } as ProfileState;
+      },
       // Rehydrated from <Providers> after mount so server and client markup match.
       skipHydration: true,
     },
@@ -74,8 +63,7 @@ export const useProfile = create<ProfileState>()(
 export async function hydrateProfile() {
   if (useProfile.getState().hydrated) return;
   await useProfile.persist.rehydrate();
-  const s = useProfile.getState();
-  useProfile.setState({ hydrated: true, token: s.token || newToken() });
+  useProfile.setState({ hydrated: true });
 }
 
 export const fmt = (n: number) => Math.round(n).toLocaleString("en-US");

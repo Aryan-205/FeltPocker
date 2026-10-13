@@ -1,3 +1,4 @@
+import { SignInGate } from "@/components/auth/sign-in-gate";
 import { PageHeading, PageShell } from "@/components/page-shell";
 import { FriendsClient } from "@/components/rooms/friends-client";
 
@@ -13,7 +14,9 @@ export default function FriendsPage() {
         }
         body="Create a private room and share the code. Only people with the code can join. Everyone plays with play-money chips from their own bankroll."
       />
-      <FriendsClient />
+      <SignInGate>
+        <FriendsClient />
+      </SignInGate>
     </PageShell>
   );
 }
