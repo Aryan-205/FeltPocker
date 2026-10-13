@@ -154,13 +154,22 @@ export function CoachPanel({
     return () => clearTimeout(id);
   }, [pending, feed]);
 
-  // Keep pinned to the latest message unless the player scrolled up to read.
+  // Always keep the chat scrolled to the latest message, including when
+  // messages grow or shrink after they render (e.g. advice collapsing).
   const scroller = useRef<HTMLDivElement>(null);
-  const pinned = useRef(true);
+  const content = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = scroller.current;
-    if (el && pinned.current) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [feed, pending]);
+    const inner = content.current;
+    if (!el || !inner) return;
+    const stick = () => {
+      el.scrollTop = el.scrollHeight;
+    };
+    stick();
+    const ro = new ResizeObserver(stick);
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, []);
 
   const activeAdvice = heroTurn ? [...feed].reverse().find((m) => m.kind === "advice")?.id : undefined;
   const typing = pending > 0 || (heroTurn && !advice);
@@ -183,31 +192,29 @@ export function CoachPanel({
 
       <div
         ref={scroller}
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-        }}
-        className="scrollbar-thin relative min-h-0 flex-1 space-y-2.5 overflow-y-auto px-3 py-3"
+        className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto px-3 py-3"
       >
-        {feed.map((m) => (
-          <motion.div key={m.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }}>
-            <Message msg={m} live={m.id === activeAdvice} />
-          </motion.div>
-        ))}
-        <AnimatePresence>
-          {typing && (
-            <motion.div key="typing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex w-fit gap-1 rounded-2xl rounded-tl-md bg-white/[0.05] px-3 py-2.5 ring-1 ring-white/5">
-              {[0, 1, 2].map((i) => (
-                <motion.span
-                  key={i}
-                  className="h-1.5 w-1.5 rounded-full bg-cream/50"
-                  animate={{ opacity: [0.3, 1, 0.3] }}
-                  transition={{ duration: 1.1, repeat: Infinity, delay: i * 0.18 }}
-                />
-              ))}
+        <div ref={content} className="space-y-2.5">
+          {feed.map((m) => (
+            <motion.div key={m.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }}>
+              <Message msg={m} live={m.id === activeAdvice} />
             </motion.div>
-          )}
-        </AnimatePresence>
+          ))}
+          <AnimatePresence>
+            {typing && (
+              <motion.div key="typing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex w-fit gap-1 rounded-2xl rounded-tl-md bg-white/[0.05] px-3 py-2.5 ring-1 ring-white/5">
+                {[0, 1, 2].map((i) => (
+                  <motion.span
+                    key={i}
+                    className="h-1.5 w-1.5 rounded-full bg-cream/50"
+                    animate={{ opacity: [0.3, 1, 0.3] }}
+                    transition={{ duration: 1.1, repeat: Infinity, delay: i * 0.18 }}
+                  />
+                ))}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
     </aside>
   );
